@@ -1,0 +1,142 @@
+# ASP.NET
+# Build and test ASP.NET projects.
+# Add steps that publish symbols, save build artifacts, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/apps/aspnet/build-aspnet-4
+
+trigger:
+  - main
+  - feature/*
+  - fix/*
+  - chore/*
+
+pool:
+  vmImage: 'ubuntu-20.04'
+  
+variables:
+  projectDir: "Docker.Games"
+  devTag: dev-$(Build.BuildId)
+  testTag: test-$(Build.BuildId)
+  prodTag: $(Build.BuildId)
+  isMain: $[eq(variables['Build.SourceBranch'], 'refs/heads/main')]
+  dockerRepositoryName: "docker-2048"
+  slotName: Staging
+  
+stages:
+- stage: Build
+  displayName: "Build and Publish Artifacts"
+  jobs:
+  - job: BuildAndPublishImages
+    displayName: Build and Publish Docker Images
+    steps:
+    - task: Docker@2
+      displayName: build
+      inputs:
+        containerRegistry: 'czcnxxrx3acr'
+        repository: '$(dockerRepositoryName)'
+        command: 'build'
+        Dockerfile: '$(Build.SourcesDirectory)/$(projectDir)/Dockerfile'
+        buildContext: '$(Build.SourcesDirectory)/'
+        tags: $(devTag)
+
+    - task: Docker@2
+      displayName: push
+      inputs:
+        containerRegistry: 'czcnxxrx3acr'
+        repository: '$(dockerRepositoryName)'
+        command: 'push'
+        Dockerfile: '$(Build.SourcesDirectory)/$(projectDir)/Dockerfile'
+        buildContext: '$(Build.SourcesDirectory)/'
+        tags: $(devTag)
+
+    - bash: |
+        docker tag czcnxxrx3acr.azurecr.cn/$(dockerRepositoryName):$(devTag) czcnxxrx2acr.azurecr.cn/$(dockerRepositoryName):$(testTag)
+        docker tag czcnxxrx3acr.azurecr.cn/$(dockerRepositoryName):$(devTag) czcnxxrx1acr.azurecr.cn/$(dockerRepositoryName):$(prodTag)
+      displayName: Docker tag image for test environment
+
+    - task: Docker@2
+      displayName: push
+      inputs:
+        containerRegistry: 'czcnxxrx2acr'
+        repository: '$(dockerRepositoryName)'
+        command: 'push'
+        Dockerfile: '$(Build.SourcesDirectory)/$(projectDir)/Dockerfile'
+        buildContext: '$(Build.SourcesDirectory)/'
+        tags: $(testTag)
+
+    - task: Docker@2
+      displayName: push
+      inputs:
+        containerRegistry: 'czcnxxrx1acr'
+        repository: '$(dockerRepositoryName)'
+        command: 'push'
+        Dockerfile: '$(Build.SourcesDirectory)/$(projectDir)/Dockerfile'
+        buildContext: '$(Build.SourcesDirectory)/'
+        tags: $(prodTag)
+  
+  - job: Blackduck
+    displayName: FOSS Scanning
+    steps:
+      - task: SynopsysDetectTask@7
+        inputs:
+          BlackDuckService: 'Blackduck_Hub'
+          DetectVersion: 'latest'
+          DetectArguments: |
+            --detect.project.name="xxxxxxx" 
+            --detect.project.version.distribution=INTERNAL
+            --detect.project.version.name=1.0.1
+    
+  - job: Coverity
+    displayName: Coverity Validation
+    steps:
+      - task: SynopsysPolaris@1
+        inputs:
+          polarisService: 'Polaris_Hub'
+          polarisCommand: 'analyze -w'
+
+- stage: Dev
+  displayName: 'Deploy to Dev'
+  dependsOn: Build
+  variables:
+  - group: ${{ variables.dockerRepositoryName }}-dev
+  jobs: 
+  - deployment: 'Deploy_to_dev'
+    displayName: 'Push to dev Env'
+    environment: $(dockerRepositoryName)-dev
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: echo "deploy dev"
+
+- stage: Test
+  displayName: 'Deploy to Test'
+  dependsOn: Dev
+  variables:
+  - group: ${{ variables.dockerRepositoryName }}-test
+  condition: and(succeeded(), eq(variables.isMain, 'true'))
+  jobs: 
+  - deployment: 'Deploy_to_test'
+    displayName: 'Push to Test Env'
+    environment: $(dockerRepositoryName)-test
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: echo "deploy test"
+          - task: Run API/Integration Test
+
+- stage: Prod
+  displayName: 'Deploy to Prod'
+  dependsOn: Test
+  variables:
+  - group: ${{ variables.dockerRepositoryName }}-prod
+  condition: and(succeeded(), eq(variables.isMain, 'true'))
+  jobs: 
+  - deployment: 'Deploy_to_prod'
+    displayName: 'Push to Prod Env'
+    environment: $(dockerRepositoryName)-prod
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: echo "deploy prod"
